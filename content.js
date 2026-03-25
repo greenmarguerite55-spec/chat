@@ -34,9 +34,10 @@
     railTimer: null,
     reloadTimer: null,
     toolbarDrag: null,
+    colorPickerOpen: false,
+    selectionPromptColorPickerOpen: false,
+    selectionPromptDrag: null,
     popoverDrag: null,
-    rightDragState: null,
-    suppressNextContextMenu: false,
     popoverAnnotationIds: [],
     popoverSelectedId: null,
     booted: false
@@ -94,15 +95,28 @@
     root.innerHTML = [
       '<div id="cgpt-annotator-toolbar" hidden>',
       '  <div class="cgpt-annotator-panel-top">',
-      '    <p id="cgpt-annotator-toolbar-title" class="cgpt-annotator-heading">Add highlight and note</p>',
+      '    <p id="cgpt-annotator-toolbar-title" class="cgpt-annotator-heading">Add annotation</p>',
+      '    <button id="cgpt-annotator-color-trigger" class="cgpt-annotator-color-trigger" type="button" aria-label="Current highlight color"></button>',
       '  </div>',
-      '  <div class="cgpt-annotator-color-row" data-role="colors"></div>',
+      '  <div id="cgpt-annotator-color-popover" class="cgpt-annotator-color-popover" data-role="colors" hidden></div>',
+      '  <input id="cgpt-annotator-title" type="text" placeholder="Title (optional)">',
       '  <textarea id="cgpt-annotator-note" placeholder="Write a note (optional)"></textarea>',
       '  <div class="cgpt-annotator-action-row">',
       '    <button class="cgpt-annotator-btn cgpt-annotator-btn-secondary" data-action="cancel">Cancel</button>',
       '    <button id="cgpt-annotator-save" class="cgpt-annotator-btn cgpt-annotator-btn-primary" data-action="save">Save</button>',
       '  </div>',
-      '  <p id="cgpt-annotator-toolbar-subtle" class="cgpt-annotator-subtle">Left-select text and click it again to annotate, or right-drag to annotate directly.</p>',
+      '  <p id="cgpt-annotator-toolbar-subtle" class="cgpt-annotator-subtle">Confirm the highlight, then add a title and note.</p>',
+      '</div>',
+      '<div id="cgpt-annotator-selection-prompt" hidden>',
+      '  <div class="cgpt-annotator-panel-top cgpt-annotator-selection-top">',
+      '    <p class="cgpt-annotator-selection-copy">Add annotation?</p>',
+      '    <button id="cgpt-annotator-selection-color-trigger" class="cgpt-annotator-selection-color" data-action="toggle-selection-colors" aria-label="Choose highlight color"></button>',
+      '  </div>',
+      '  <div id="cgpt-annotator-selection-color-popover" class="cgpt-annotator-selection-color-popover" data-role="selection-colors" hidden></div>',
+      '  <div class="cgpt-annotator-selection-actions">',
+      '    <button class="cgpt-annotator-btn cgpt-annotator-btn-secondary" data-action="cancel-selection">Cancel</button>',
+      '    <button class="cgpt-annotator-btn cgpt-annotator-btn-primary" data-action="open-selection-editor">Edit</button>',
+      '  </div>',
       '</div>',
       '<div id="cgpt-annotator-popover" hidden></div>',
       '<div id="cgpt-annotator-rail" aria-label="Annotation rail"></div>'
@@ -112,26 +126,44 @@
 
     state.dom.root = root;
     state.dom.toolbar = root.querySelector("#cgpt-annotator-toolbar");
+    state.dom.selectionPrompt = root.querySelector("#cgpt-annotator-selection-prompt");
     state.dom.toolbarTitle = root.querySelector("#cgpt-annotator-toolbar-title");
     state.dom.toolbarSubtle = root.querySelector("#cgpt-annotator-toolbar-subtle");
     state.dom.saveButton = root.querySelector("#cgpt-annotator-save");
+    state.dom.colorTrigger = root.querySelector("#cgpt-annotator-color-trigger");
+    state.dom.selectionColorTrigger = root.querySelector("#cgpt-annotator-selection-color-trigger");
+    state.dom.titleInput = root.querySelector("#cgpt-annotator-title");
     state.dom.noteInput = root.querySelector("#cgpt-annotator-note");
     state.dom.colors = root.querySelector('[data-role="colors"]');
+    state.dom.selectionColors = root.querySelector('[data-role="selection-colors"]');
     state.dom.popover = root.querySelector("#cgpt-annotator-popover");
     state.dom.rail = root.querySelector("#cgpt-annotator-rail");
 
     COLOR_OPTIONS.forEach((color) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "cgpt-annotator-color-btn";
-      button.dataset.color = color.name;
-      button.title = color.name;
-      button.style.background = color.value;
+      const toolbarButton = document.createElement("button");
+      toolbarButton.type = "button";
+      toolbarButton.className = "cgpt-annotator-color-btn";
+      toolbarButton.dataset.color = color.name;
+      toolbarButton.title = color.name;
+      toolbarButton.style.background = color.value;
       if (color.name === state.selectedColor) {
-        button.classList.add("is-selected");
+        toolbarButton.classList.add("is-selected");
       }
-      state.dom.colors.appendChild(button);
+      state.dom.colors.appendChild(toolbarButton);
+
+      const promptButton = document.createElement("button");
+      promptButton.type = "button";
+      promptButton.className = "cgpt-annotator-color-btn";
+      promptButton.dataset.color = color.name;
+      promptButton.title = color.name;
+      promptButton.style.background = color.value;
+      if (color.name === state.selectedColor) {
+        promptButton.classList.add("is-selected");
+      }
+      state.dom.selectionColors.appendChild(promptButton);
     });
+
+    syncSelectedColor();
   }
 
   function bindEvents() {
@@ -145,16 +177,48 @@
       syncSelectedColor();
     });
 
+    state.dom.selectionColors.addEventListener("click", (event) => {
+      const target = getEventElementTarget(event);
+      const button = target ? target.closest(".cgpt-annotator-color-btn") : null;
+      if (!button) {
+        return;
+      }
+      state.selectedColor = button.dataset.color;
+      syncSelectedColor();
+      setSelectionPromptColorPickerVisible(false);
+    });
+
     state.dom.toolbar.addEventListener("click", async (event) => {
       const target = getEventElementTarget(event);
       const button = target ? target.closest("[data-action]") : null;
       const action = button ? button.dataset.action : null;
+      if (action === "toggle-colors") {
+        setColorPickerVisible(!state.colorPickerOpen);
+        return;
+      }
       if (action === "cancel") {
         hideToolbar();
         return;
       }
       if (action === "save") {
         await savePendingAnnotation();
+      }
+    });
+
+    state.dom.selectionPrompt.addEventListener("click", (event) => {
+      const target = getEventElementTarget(event);
+      const button = target ? target.closest("[data-action]") : null;
+      const action = button ? button.dataset.action : null;
+      if (action === "toggle-selection-colors") {
+        setSelectionPromptColorPickerVisible(!state.selectionPromptColorPickerOpen);
+        return;
+      }
+      if (action === "cancel-selection") {
+        hideSelectionPrompt(true);
+        return;
+      }
+      if (action === "open-selection-editor") {
+        confirmPendingSelection();
       }
     });
 
@@ -191,6 +255,13 @@
       beginPanelDrag("toolbar", event, state.dom.toolbar);
     });
 
+    state.dom.selectionPrompt.addEventListener("mousedown", (event) => {
+      if (!shouldStartPanelDrag(event, state.dom.selectionPrompt)) {
+        return;
+      }
+      beginPanelDrag("selectionPrompt", event, state.dom.selectionPrompt);
+    });
+
     state.dom.popover.addEventListener("mousedown", (event) => {
       if (!shouldStartPanelDrag(event, state.dom.popover)) {
         return;
@@ -200,53 +271,18 @@
 
     window.addEventListener("mousemove", (event) => {
       updatePanelDrag(event);
-      updateRightDragSelection(event);
     });
 
     window.addEventListener("mouseup", (event) => {
       endPanelDrag();
-      if (event.button === 2) {
-        finishRightDragSelection(event);
-        return;
-      }
       if (event.button === 0) {
         capturePendingLeftSelection(event);
       }
     });
 
-    document.addEventListener("contextmenu", (event) => {
-      state.skipNextPendingSelectionClick = false;
-      if (state.suppressNextContextMenu) {
-        state.suppressNextContextMenu = false;
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      if (state.rightDragState && state.rightDragState.suppressContextMenu) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-
-      const range = getCurrentSelectionRange();
-      if (!range) {
-        state.contextRange = null;
-        state.lastContextPoint = null;
-        return;
-      }
-      state.contextRange = range.cloneRange();
-      state.lastContextPoint = { x: event.clientX, y: event.clientY };
-    }, true);
-
     document.addEventListener("mousedown", (event) => {
       const target = getEventElementTarget(event);
       if (target && state.dom.root.contains(target)) {
-        return;
-      }
-
-      if (event.button === 2 && shouldTrackRightDrag(event)) {
-        beginRightDragSelection(event);
-        clearPendingLeftSelection();
         return;
       }
 
@@ -255,7 +291,8 @@
       }
 
       hidePopover();
-      if (event.button !== 2 && !state.dom.toolbar.hidden) {
+      hideSelectionPrompt(true);
+      if (event.button === 0 && !state.dom.toolbar.hidden) {
         hideToolbar();
       }
     }, true);
@@ -264,7 +301,7 @@
       const target = getEventElementTarget(event);
       const marker = target ? target.closest(`.${MARKER_CLASS}`) : null;
       if (marker) {
-        clearPendingLeftSelection();
+        hideSelectionPrompt(true);
         event.preventDefault();
         openAnnotationCluster([marker.dataset.id], marker.dataset.id, null, true, true);
         return;
@@ -272,7 +309,7 @@
 
       const highlight = target ? target.closest(`.${HIGHLIGHT_CLASS}`) : null;
       if (highlight) {
-        clearPendingLeftSelection();
+        hideSelectionPrompt(true);
         event.preventDefault();
         const annotationIds = collectAnnotationIdsAtTarget(target);
         if (!annotationIds.length) {
@@ -288,8 +325,6 @@
           ? Math.hypot(event.clientX - state.pendingLeftSelectionPoint.x, event.clientY - state.pendingLeftSelectionPoint.y) < 8
           : false;
         state.skipNextPendingSelectionClick = false;
-        state.pendingLeftSelectionCapturedAt = 0;
-        state.pendingLeftSelectionPoint = null;
         if (withinGuardWindow && samePoint) {
           return;
         }
@@ -299,14 +334,11 @@
         return;
       }
 
-      if (state.pendingLeftSelectionRange && isPointInsidePendingSelection(event.clientX, event.clientY)) {
-        const point = { x: event.clientX, y: event.clientY };
-        const range = state.pendingLeftSelectionRange.cloneRange();
-        clearPendingLeftSelection();
-        openToolbarForRange(range, point, null);
+      if (target && state.dom.root.contains(target)) {
         return;
       }
 
+      hideSelectionPrompt(true);
       clearPendingLeftSelection();
     }, true);
 
@@ -315,16 +347,6 @@
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (!message) {
-        return;
-      }
-      if (message.type === "cgpt-open-annotator-from-context-menu") {
-        const range = state.contextRange || state.pendingLeftSelectionRange || getCurrentSelectionRange();
-        if (!range) {
-          return;
-        }
-        clearPendingLeftSelection();
-        clearRightDragState(true);
-        openToolbarForRange(range, state.lastContextPoint, null);
         return;
       }
       if (message.type === "cgpt-get-popup-data") {
@@ -407,14 +429,17 @@
     const range = selection.getRangeAt(0).cloneRange();
     return isRangeAnnotatable(range) ? range : null;
   }
+
   function capturePendingLeftSelection(event) {
-    const target = event.target.nodeType === Node.TEXT_NODE ? event.target.parentElement : event.target;
-    if (state.rightDragState || (target && target.closest(`#${ROOT_ID}`))) {
+    const target = getEventElementTarget(event);
+    if (target && target.closest(`#${ROOT_ID}`)) {
       return;
     }
 
     const range = getCurrentSelectionRange();
     if (!range) {
+      hideSelectionPrompt(true);
+      clearPendingLeftSelection();
       return;
     }
 
@@ -425,9 +450,10 @@
       top: rect.top,
       bottom: rect.bottom
     }));
-    state.skipNextPendingSelectionClick = true;
     state.pendingLeftSelectionCapturedAt = Date.now();
     state.pendingLeftSelectionPoint = { x: event.clientX, y: event.clientY };
+    state.skipNextPendingSelectionClick = true;
+    openSelectionPromptForRange(range, state.pendingLeftSelectionPoint);
   }
 
   function clearPendingLeftSelection() {
@@ -438,145 +464,65 @@
     state.pendingLeftSelectionPoint = null;
   }
 
-  function isPointInsidePendingSelection(x, y) {
-    return state.pendingLeftSelectionRects.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
-  }
-
-  function shouldTrackRightDrag(event) {
-    if (event.button !== 2) {
-      return false;
-    }
-    const root = getConversationRoot();
-    const target = event.target.nodeType === Node.TEXT_NODE ? event.target.parentElement : event.target;
-    if (!root || !target || !root.contains(target)) {
-      return false;
-    }
-    const blockedSelector = `#${ROOT_ID}, textarea, input, button, [contenteditable='true']`;
-    return !target.closest(blockedSelector);
-  }
-
-  function beginRightDragSelection(event) {
-    state.suppressNextContextMenu = false;
-    state.rightDragState = {
-      startPoint: { x: event.clientX, y: event.clientY },
-      currentRange: null,
-      suppressContextMenu: false,
-      moved: false
-    };
-    state.contextRange = null;
-    state.lastContextPoint = null;
-  }
-
-  function updateRightDragSelection(event) {
-    if (!state.rightDragState) {
+  function openSelectionPromptForRange(range, point) {
+    if (!range) {
       return;
     }
 
-    const distance = Math.hypot(event.clientX - state.rightDragState.startPoint.x, event.clientY - state.rightDragState.startPoint.y);
-    if (distance < 6) {
-      return;
+    hideToolbar();
+    setSelectionPromptColorPickerVisible(false);
+    syncSelectedColor();
+
+    const prompt = state.dom.selectionPrompt;
+    prompt.hidden = false;
+
+    const width = Math.min(240, window.innerWidth - 24);
+    let left = 12;
+    let top = 12;
+
+    if (point && typeof point.x === "number" && typeof point.y === "number") {
+      left = clamp(point.x + 12, 12, window.innerWidth - width - 12);
+      top = clamp(point.y + 12, 12, window.innerHeight - 140);
+    } else {
+      const rect = range.getBoundingClientRect();
+      left = clamp(rect.left + rect.width / 2 - width / 2, 12, window.innerWidth - width - 12);
+      top = rect.bottom + 10 < window.innerHeight - 140 ? rect.bottom + 10 : Math.max(12, rect.top - 96);
     }
 
-    const range = getRangeFromPoints(state.rightDragState.startPoint, { x: event.clientX, y: event.clientY });
-    state.rightDragState.moved = true;
-    if (!range || !isRangeAnnotatable(range)) {
-      state.rightDragState.currentRange = null;
-      state.rightDragState.suppressContextMenu = false;
-      return;
-    }
+    prompt.style.width = `${width}px`;
+    prompt.style.left = `${left}px`;
+    prompt.style.top = `${top}px`;
+  }
 
-    state.rightDragState.currentRange = range;
-    state.rightDragState.suppressContextMenu = normalizeWhitespace(range.toString()).length > 0;
-    const selection = window.getSelection();
-    if (selection) {
-      selection.removeAllRanges();
-      selection.addRange(range.cloneRange());
+  function hideSelectionPrompt(clearPending) {
+    endSinglePanelDrag('selectionPrompt', state.dom.selectionPrompt);
+    state.dom.selectionPrompt.hidden = true;
+    setSelectionPromptColorPickerVisible(false);
+    if (clearPending) {
+      clearPendingLeftSelection();
     }
   }
 
-  function finishRightDragSelection(event) {
-    if (!state.rightDragState) {
+  function confirmPendingSelection() {
+    if (!state.pendingLeftSelectionRange) {
+      hideSelectionPrompt(true);
       return;
     }
 
-    const dragState = state.rightDragState;
-    const range = dragState.currentRange ? dragState.currentRange.cloneRange() : null;
-    const shouldOpen = dragState.suppressContextMenu && dragState.moved && range && isRangeAnnotatable(range);
+    const range = state.pendingLeftSelectionRange.cloneRange();
+    const point = state.pendingLeftSelectionPoint
+      ? { x: state.pendingLeftSelectionPoint.x, y: state.pendingLeftSelectionPoint.y }
+      : null;
 
-    if (!shouldOpen) {
-      clearRightDragState(true);
-      return;
-    }
+    hideSelectionPrompt(false);
+    clearPendingLeftSelection();
 
-    state.suppressNextContextMenu = true;
-    clearRightDragState(false);
-
-    state.contextRange = range.cloneRange();
-    state.lastContextPoint = { x: event.clientX, y: event.clientY };
-    openToolbarForRange(range, state.lastContextPoint, null);
-  }
-
-  function clearRightDragState(clearSelection) {
-    state.rightDragState = null;
-    if (!clearSelection) {
-      return;
-    }
     const selection = window.getSelection();
     if (selection) {
       selection.removeAllRanges();
     }
-  }
 
-  function getRangeFromPoints(startPoint, endPoint) {
-    const startCaret = getCaretAtPoint(startPoint.x, startPoint.y);
-    const endCaret = getCaretAtPoint(endPoint.x, endPoint.y);
-    if (!startCaret || !endCaret) {
-      return null;
-    }
-
-    const root = getConversationRoot();
-    if (!root || !root.contains(startCaret.node) || !root.contains(endCaret.node)) {
-      return null;
-    }
-
-    const comparison = compareCaretPositions(startCaret, endCaret);
-    const first = comparison <= 0 ? startCaret : endCaret;
-    const second = comparison <= 0 ? endCaret : startCaret;
-
-    const range = document.createRange();
-    try {
-      range.setStart(first.node, clampOffset(first.node, first.offset));
-      range.setEnd(second.node, clampOffset(second.node, second.offset));
-      return range;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  function getCaretAtPoint(x, y) {
-    if (document.caretPositionFromPoint) {
-      const caret = document.caretPositionFromPoint(x, y);
-      if (caret && caret.offsetNode) {
-        return { node: caret.offsetNode, offset: caret.offset };
-      }
-    }
-    if (document.caretRangeFromPoint) {
-      const caretRange = document.caretRangeFromPoint(x, y);
-      if (caretRange) {
-        return { node: caretRange.startContainer, offset: caretRange.startOffset };
-      }
-    }
-    return null;
-  }
-
-  function compareCaretPositions(left, right) {
-    const leftRange = document.createRange();
-    const rightRange = document.createRange();
-    leftRange.setStart(left.node, clampOffset(left.node, left.offset));
-    leftRange.collapse(true);
-    rightRange.setStart(right.node, clampOffset(right.node, right.offset));
-    rightRange.collapse(true);
-    return leftRange.compareBoundaryPoints(Range.START_TO_START, rightRange);
+    openToolbarForRange(range, point, null);
   }
 
   function shouldStartPanelDrag(event, panel) {
@@ -605,6 +551,7 @@
 
   function updatePanelDrag(event) {
     updateSinglePanelDrag('toolbar', state.dom.toolbar, event);
+    updateSinglePanelDrag('selectionPrompt', state.dom.selectionPrompt, event);
     updateSinglePanelDrag('popover', state.dom.popover, event);
   }
 
@@ -623,6 +570,7 @@
 
   function endPanelDrag() {
     endSinglePanelDrag('toolbar', state.dom.toolbar);
+    endSinglePanelDrag('selectionPrompt', state.dom.selectionPrompt);
     endSinglePanelDrag('popover', state.dom.popover);
   }
 
@@ -662,17 +610,19 @@
 
 
   function openToolbarForRange(range, point, annotation) {
+    hideSelectionPrompt(false);
     clearPendingLeftSelection();
-    clearRightDragState(false);
     state.pendingRange = range ? range.cloneRange() : null;
     state.editingAnnotationId = annotation ? annotation.id : null;
-    state.selectedColor = annotation ? annotation.color : state.selectedColor;
+    state.selectedColor = annotation ? annotation.color : COLOR_OPTIONS[0].name;
+    state.dom.titleInput.value = annotation ? (annotation.title || "") : "";
     state.dom.noteInput.value = annotation ? (annotation.note || "") : "";
-    state.dom.toolbarTitle.textContent = annotation ? "Edit annotation" : "Add highlight and note";
+    state.dom.toolbarTitle.textContent = annotation ? "Edit annotation" : "Add annotation";
     state.dom.toolbarSubtle.textContent = annotation
-      ? "Update the note or color for this highlight."
-      : "Left-select text and click it again to annotate, or right-drag to annotate directly.";
-    state.dom.saveButton.textContent = annotation ? "Update" : "Save";
+      ? "Update the title, note, or highlight color for this annotation."
+      : "Confirm the highlight, then add a title and note.";
+    state.dom.saveButton.textContent = annotation ? "Edit" : "Save";
+    setColorPickerVisible(true);
     syncSelectedColor();
 
     const toolbar = state.dom.toolbar;
@@ -684,44 +634,77 @@
 
     if (point && typeof point.x === "number" && typeof point.y === "number") {
       left = clamp(point.x + 12, 12, window.innerWidth - width - 12);
-      top = clamp(point.y + 12, 12, window.innerHeight - 240);
+      top = clamp(point.y + 12, 12, window.innerHeight - 280);
     } else if (range) {
       const rect = range.getBoundingClientRect();
       left = clamp(rect.left + rect.width / 2 - width / 2, 12, window.innerWidth - width - 12);
-      top = rect.bottom + 10 < window.innerHeight - 240 ? rect.bottom + 10 : Math.max(12, rect.top - 240);
+      top = rect.bottom + 10 < window.innerHeight - 280 ? rect.bottom + 10 : Math.max(12, rect.top - 280);
     }
 
     toolbar.style.width = `${width}px`;
     toolbar.style.left = `${left}px`;
     toolbar.style.top = `${top}px`;
-    state.dom.noteInput.focus();
+    state.dom.titleInput.focus();
   }
 
   function hideToolbar() {
-    clearPendingLeftSelection();
-    clearRightDragState(true);
     endSinglePanelDrag('toolbar', state.dom.toolbar);
     state.pendingRange = null;
     state.editingAnnotationId = null;
     state.contextRange = null;
     state.lastContextPoint = null;
     state.dom.toolbar.hidden = true;
-    state.dom.toolbarTitle.textContent = "Add highlight and note";
-    state.dom.toolbarSubtle.textContent = "Left-select text and click it again to annotate, or right-drag to annotate directly.";
+    state.dom.toolbarTitle.textContent = "Add annotation";
+    state.dom.toolbarSubtle.textContent = "Confirm the highlight, then add a title and note.";
     state.dom.saveButton.textContent = "Save";
+    state.dom.titleInput.value = "";
+    state.dom.noteInput.value = "";
+    state.selectedColor = COLOR_OPTIONS[0].name;
+    setColorPickerVisible(false);
+    syncSelectedColor();
+  }
+
+  function setColorPickerVisible(visible) {
+    state.colorPickerOpen = Boolean(visible);
+    if (state.dom.colors) {
+      state.dom.colors.hidden = !state.colorPickerOpen;
+    }
+    if (state.dom.colorTrigger) {
+      state.dom.colorTrigger.classList.toggle("is-open", state.colorPickerOpen);
+    }
+  }
+
+  function setSelectionPromptColorPickerVisible(visible) {
+    state.selectionPromptColorPickerOpen = Boolean(visible);
+    if (state.dom.selectionColors) {
+      state.dom.selectionColors.hidden = !state.selectionPromptColorPickerOpen;
+    }
+    if (state.dom.selectionColorTrigger) {
+      state.dom.selectionColorTrigger.classList.toggle("is-open", state.selectionPromptColorPickerOpen);
+    }
   }
 
   function syncSelectedColor() {
     state.dom.colors.querySelectorAll(".cgpt-annotator-color-btn").forEach((button) => {
       button.classList.toggle("is-selected", button.dataset.color === state.selectedColor);
     });
+    state.dom.selectionColors.querySelectorAll(".cgpt-annotator-color-btn").forEach((button) => {
+      button.classList.toggle("is-selected", button.dataset.color === state.selectedColor);
+    });
+    if (state.dom.colorTrigger) {
+      state.dom.colorTrigger.style.background = getColorByName(state.selectedColor).value;
+    }
+    if (state.dom.selectionColorTrigger) {
+      state.dom.selectionColorTrigger.style.background = getColorByName(state.selectedColor).value;
+    }
   }
 
   async function savePendingAnnotation() {
+    const title = state.dom.titleInput.value.trim();
     const note = state.dom.noteInput.value.trim();
 
     if (state.editingAnnotationId) {
-      const updated = updateAnnotation(state.editingAnnotationId, state.selectedColor, note);
+      const updated = updateAnnotation(state.editingAnnotationId, state.selectedColor, title, note);
       hideToolbar();
       if (!updated) {
         return;
@@ -739,7 +722,7 @@
       return;
     }
 
-    const annotation = createAnnotation(state.pendingRange, state.selectedColor, note);
+    const annotation = createAnnotation(state.pendingRange, state.selectedColor, title, note);
     if (!annotation) {
       hideToolbar();
       return;
@@ -767,7 +750,6 @@
     scheduleRailUpdate();
   }
 
-
   function beginEditAnnotation(annotationId) {
     const annotation = state.annotations.find((item) => item.id === annotationId);
     if (!annotation) {
@@ -784,13 +766,14 @@
     openToolbarForRange(range, point, annotation);
   }
 
-  function updateAnnotation(annotationId, colorName, note) {
+  function updateAnnotation(annotationId, colorName, title, note) {
     const annotation = state.annotations.find((item) => item.id === annotationId);
     if (!annotation) {
       return null;
     }
 
     annotation.color = colorName;
+    annotation.title = title;
     annotation.note = note;
     annotation.updatedAt = new Date().toISOString();
 
@@ -803,7 +786,7 @@
     return annotation;
   }
 
-  function createAnnotation(range, colorName, note) {
+  function createAnnotation(range, colorName, title, note) {
     const root = getConversationRoot();
     if (!root) {
       return null;
@@ -823,6 +806,7 @@
     return {
       id: `ann-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
       color: colorName,
+      title,
       note,
       quote,
       occurrence,
@@ -837,7 +821,7 @@
         suffix: quoteIndex >= 0 ? linear.text.slice(quoteIndex + quote.length, quoteIndex + quote.length + 24) : quote.slice(-24)
       },
       textPosition,
-      snippet: normalizeWhitespace(quote).slice(0, 80),
+      snippet: normalizeWhitespace(title || quote).slice(0, 80),
       createdAt: new Date().toISOString()
     };
   }
@@ -1225,7 +1209,7 @@
             return "";
           }
           const selectedClass = annotationId === selectedAnnotation.id ? ' is-selected' : '';
-          const summary = escapeHtml(normalizeWhitespace(annotation.note || annotation.quote || `Annotation ${index + 1}`));
+          const summary = escapeHtml(normalizeWhitespace(annotation.title || annotation.note || annotation.quote || `Annotation ${index + 1}`));
           return [
             `<button class="cgpt-annotator-choice${selectedClass}" data-action="select-annotation" data-id="${annotation.id}">`,
             `  <span class="cgpt-annotator-choice-dot" style="background:${getColorByName(annotation.color).value}"></span>`,
@@ -1234,6 +1218,15 @@
           ].join("");
         }).join(""),
         '</div>'
+      ].join("")
+      : "";
+
+    const titleSectionHtml = selectedAnnotation.title
+      ? [
+        '  <div class="cgpt-annotator-popover-section">',
+        '    <p class="cgpt-annotator-popover-label">Title</p>',
+        `    <div class="cgpt-annotator-popover-title-text">${escapeHtml(selectedAnnotation.title)}</div>`,
+        '  </div>'
       ].join("")
       : "";
 
@@ -1248,6 +1241,7 @@
       '</div>',
       selectorHtml,
       '<div class="cgpt-annotator-popover-content">',
+      titleSectionHtml,
       '  <div class="cgpt-annotator-popover-section">',
       '    <p class="cgpt-annotator-popover-label">Highlight</p>',
       `    <p class="cgpt-annotator-popover-quote">${escapeHtml(selectedAnnotation.quote)}</p>`,
@@ -1617,6 +1611,10 @@
     annotations.forEach((annotation, index) => {
       lines.push(`## Annotation ${index + 1}`);
       lines.push("");
+      lines.push("### Title");
+      lines.push("");
+      lines.push(annotation.title || "");
+      lines.push("");
       lines.push("### Highlight");
       lines.push("");
       lines.push(annotation.quote || "");
@@ -1633,6 +1631,7 @@
   function serializeAnnotation(annotation) {
     return {
       id: annotation.id,
+      title: annotation.title || "",
       quote: annotation.quote || "",
       note: annotation.note || "",
       createdAt: annotation.createdAt || null,

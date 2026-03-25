@@ -111,6 +111,10 @@ function buildMarkdownDocument(chat) {
   chat.annotations.forEach((annotation, index) => {
     lines.push(`## Annotation ${index + 1}`);
     lines.push("");
+    lines.push("### Title");
+    lines.push("");
+    lines.push(annotation.title || "");
+    lines.push("");
     lines.push("### Highlight");
     lines.push("");
     lines.push(annotation.quote || "");
